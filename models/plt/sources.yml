@@ -1,0 +1,22 @@
+version: 2
+
+# Source definitions are not used by orders.sql (which queries INFORMATION_SCHEMA
+# directly via get_source_columns for dynamic schema detection).
+# Kept here for dbt source freshness checks and documentation purposes.
+
+sources:
+  - name: hevo_temp_k1
+    description: "Temp schema written by pipeline k1 (loader output)"
+    database: "{{ var('k1_db') }}"
+    schema: "{{ var('k1_schema') }}"
+    tables:
+      - name: orders
+        description: "Source orders table — base schema (no phone column)"
+
+  - name: hevo_temp_k1_prime
+    description: "Temp schema written by pipeline k1_prime (loader output)"
+    database: "{{ var('k1_db') }}"
+    schema: "{{ var('k1_prime_schema') }}"
+    tables:
+      - name: orders
+        description: "Source orders table — extended schema (adds phone column)"
