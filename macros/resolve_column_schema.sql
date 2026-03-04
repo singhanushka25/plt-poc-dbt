@@ -12,12 +12,14 @@
   {% set unified = {} %}
 
   {% for src in sources %}
-    {% set cols = get_source_columns(src.database, src.schema, src.table) %}
-    {% for col in cols %}
-      {% if col.name | upper not in unified %}
-        {% do unified.update({col.name | upper: col.type}) %}
-      {% endif %}
-    {% endfor %}
+    {% set rel = adapter.get_relation(database=src.database, schema=src.schema, identifier=src.table) %}
+    {% if rel %}
+      {% for col in adapter.get_columns_in_relation(rel) %}
+        {% if col.name | upper not in unified and col.name | upper != '__HEVO_SOURCE_PIPELINE' %}
+          {% do unified.update({col.name | upper: col.dtype}) %}
+        {% endif %}
+      {% endfor %}
+    {% endif %}
   {% endfor %}
 
   {{ return(unified) }}

@@ -9,8 +9,8 @@
     src: {database, schema, table, label}
     unified_columns: dict of {COLUMN_NAME: DATA_TYPE} from resolve_column_schema
   #}
-  {% set src_cols = get_source_columns(src.database, src.schema, src.table) %}
-  {% set src_col_names = src_cols | map(attribute='name') | map('upper') | list %}
+  {% set rel = adapter.get_relation(database=src.database, schema=src.schema, identifier=src.table) %}
+  {% set src_col_names = adapter.get_columns_in_relation(rel) | map(attribute='name') | map('upper') | list %}
 
   SELECT
   {% for col_name, col_type in unified_columns.items() %}
