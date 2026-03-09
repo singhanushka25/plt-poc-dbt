@@ -43,32 +43,48 @@
         {% set p = [ta_p, tb_p] | max %}
         {% set s = [ta_s, tb_s] | max %}
         {{ return('NUMBER(' ~ p ~ ',' ~ s ~ ')') }}
+      {% elif ta_params %}
+        {{ return(type_a) }}
+      {% elif tb_params %}
+        {{ return(type_b) }}
       {% else %}
-        {{ return('NUMBER(38,18)') }}
+        {{ return(type_a) }}
       {% endif %}
 
     {% elif ta_base in ('VARCHAR', 'TEXT', 'STRING', 'CHARACTERVARYING') %}
       {% if ta_params and tb_params %}
         {% set size = [ta_params | int, tb_params | int] | max %}
         {{ return('VARCHAR(' ~ size ~ ')') }}
+      {% elif ta_params %}
+        {{ return(type_a) }}
+      {% elif tb_params %}
+        {{ return(type_b) }}
       {% else %}
-        {{ return('VARCHAR(16777216)') }}
+        {{ return(type_a) }}
       {% endif %}
 
     {% elif ta_base in ('TIMESTAMP_NTZ', 'TIMESTAMP_LTZ', 'TIMESTAMP_TZ', 'TIMESTAMP') %}
       {% if ta_params and tb_params %}
         {% set p = [ta_params | int, tb_params | int] | max %}
         {{ return(ta_base ~ '(' ~ p ~ ')') }}
+      {% elif ta_params %}
+        {{ return(type_a) }}
+      {% elif tb_params %}
+        {{ return(type_b) }}
       {% else %}
-        {{ return(ta_base ~ '(9)') }}
+        {{ return(ta_base) }}
       {% endif %}
 
     {% elif ta_base == 'TIME' %}
       {% if ta_params and tb_params %}
         {% set p = [ta_params | int, tb_params | int] | max %}
         {{ return('TIME(' ~ p ~ ')') }}
+      {% elif ta_params %}
+        {{ return(type_a) }}
+      {% elif tb_params %}
+        {{ return(type_b) }}
       {% else %}
-        {{ return('TIME(9)') }}
+        {{ return(type_a) }}
       {% endif %}
 
     {% else %}
