@@ -4,458 +4,372 @@ Each test case consists of: SQL data file(s), suite YAML, sentinel test Python, 
 
 ---
 
-## Shared Infrastructure (implement first)
+## What's Already Implemented (8 tests)
 
-### `plt_runner.py`
-**Path**: `sentinel-tests/functional/tests/post_load_transformations/plt_runner.py`
-**Purpose**: Extracts DBT invocation out of `run_poc.py` so each test can call it directly.
+All shared infra + 8 tests exist in sentinel (`feat/H2-31153/plt_poc` branch):
 
-```python
-import json, subprocess, yaml
-from pathlib import Path
+| plt_all.yml ID | Test | Branch | Sentinel Files |
+|---|---|---|---|
+| A1 | plt_add_column | A (cross-source) | sql, yml, py — all done |
+| A2 | plt_column_name_mismatch | A (cross-source) | sql, yml, py — all done |
+| A3 | plt_type_widen_safe | A (cross-source) | sql, yml, py — all done |
+| A4 | plt_type_conflict | A (cross-source) | sql, yml, py — all done |
+| B1 | plt_drop_column | B (evolution) | base.sql, alter.sql, yml, py — all done |
+| B2 | plt_add_column_all | B (evolution) | base.sql, alter.sql, yml, py — all done |
+| B3 | plt_type_widen_inline | B (evolution) | base.sql, alter.sql, yml, py — all done |
+| B4 | plt_no_narrow | B (evolution) | base.sql, alter.sql, yml, py — all done |
 
-FUNCTIONAL = Path(__file__).parent.parent.parent   # sentinel-tests/functional/
-DBT_DIR    = Path("/Users/anushkasingh/Desktop/PLT/plt-poc-dbt")
+**Shared infra done**: `plt_runner.py` with `run_dbt()` + `discover_schemas()`.
 
-def run_dbt(vars_dict: dict) -> None:
-    sf      = yaml.safe_load((FUNCTIONAL / "config.yml").read_text())["local"]["test_dbs"]["snowflake"]
-    account = sf["host"].removeprefix("https://").removesuffix(".snowflakecomputing.com")
-    profiles = {"plt_poc": {"target": "dev", "outputs": {"dev": {
-        "type": "snowflake", "account": account,
-        "user": sf["root_username"], "password": sf["root_password"],
-        "warehouse": sf["warehouse"], "database": vars_dict["k1_db"],
-        "schema": "PLT_FINAL", "threads": 4
-    }}}}
-    (DBT_DIR / "profiles.yml").write_text(yaml.dump(profiles, default_flow_style=False))
-    subprocess.run(["dbt", "run", "--vars", json.dumps(vars_dict)], cwd=DBT_DIR, check=True)
-```
-
-### Schema discovery helper (used in every test)
-```python
-def _discover_schemas(fi):
-    object_to_mapping = fi.catalog_client.get_catalog_mappings(
-        fi.id, fi.source.id, fi.destination.connection_type
-    )
-    k1_db = k1_schema = k1_prime_schema = k1_table = None
-    for mapping in object_to_mapping.values():
-        dst = mapping.destination_namespace
-        k1_db, k1_table = dst.k2, dst.k0
-        if "prime" in dst.k1.lower():
-            k1_prime_schema = dst.k1
-        else:
-            k1_schema = dst.k1
-    return dict(k1_db=k1_db, k1_schema=k1_schema,
-                k1_prime_schema=k1_prime_schema, k1_table=k1_table)
-```
-
-### Macro changes needed before any type-evolution tests
-
-| Macro | Change |
-|-------|--------|
-| `macros/get_widened_type.sql` | NEW — takes two type strings, returns wider type or VARCHAR(256) on conflict |
-| `macros/resolve_column_schema.sql` | UPDATE — pairwise LCA reduction (call `get_widened_type` instead of first-seen-wins); filter `__HEVO__*` columns |
-| `macros/evolve_final_table.sql` | UPDATE — add type ALTER (widen) + narrowing skip logic |
+**Macros done**: `get_widened_type.sql`, `resolve_column_schema.sql`, `evolve_final_table.sql`, `generate_source_select.sql`.
 
 ---
 
-## TEST 1 — plt_add_column (existing, update only)
+## Full Test Suite: 45 Tests across 7 Branches
 
+### Priority Summary
+| Priority | Count | Done | Remaining |
+|----------|-------|------|-----------|
+| **P0** | 16 | 6 | **10 new** |
+| **P1** | 15 | 2 | 13 new |
+| **P2** | 14 | 0 | 14 new |
+
+### Design Decisions (User-Confirmed)
+1. **PK/Merge Key**: IN SCOPE — implement `resolve_merge_key` macro + model refactor
+2. **NOT NULL**: Enforce when all sources agree — enhance macros
+3. **POC Scope**: Phase 1 only (P0 + PK tests = 19 tests total, 11 new)
+
+---
+
+## BRANCH A: Cross-Source Drift (single dbt run, schemas differ from start)
+
+| ID | Name | Scenario | Priority | Status |
+|----|------|----------|----------|--------|
+| A01 | plt_add_column | k1 missing `phone`, k1_prime has it | P0 | **DONE** |
+| A02 | plt_column_name_mismatch | k1 has `mobile`, k1_prime has `phone` | P0 | **DONE** |
+| A03 | plt_type_widen_safe | salary NUMERIC(10,3) vs NUMERIC(15,6) | P0 | **DONE** |
+| A04 | plt_type_conflict | salary FLOAT vs NUMERIC(10,3) → VARCHAR | P0 | **DONE** |
+| A05 | plt_type_widen_varchar | name VARCHAR(100) vs VARCHAR(500) | P0 | NEW |
+| A06 | plt_add_multiple_columns | k1_prime has 3 extra columns | P0 | NEW |
+| A07 | plt_add_column_plus_type_drift | k1_prime adds phone + wider salary | P0 | NEW |
+| A08 | plt_type_widen_date_to_timestamp | DATE vs TIMESTAMP_NTZ(6) | P1 | deferred |
+| A09 | plt_type_widen_bool_to_number | BOOLEAN vs NUMBER(10,0) | P1 | deferred |
+| A10 | plt_type_widen_ntz_to_tz | TIMESTAMP_NTZ(3) vs TIMESTAMP_TZ(3) | P1 | deferred |
+| A11 | plt_type_conflict_date_vs_bool | DATE vs BOOLEAN → VARCHAR | P1 | deferred |
+| A12 | plt_type_number_overridden_by_string | NUMBER(10,3) vs VARCHAR(500) | P1 | deferred |
+| A13 | plt_type_widen_timestamp_precision | TIMESTAMP_NTZ(3) vs TIMESTAMP_NTZ(6) | P2 | deferred |
+| A14 | plt_type_decimal_scale_zero | NUMBER(10,0) vs NUMBER(15,3) | P2 | deferred |
+
+---
+
+## BRANCH B: Consistent Evolution (two dbt runs, sources change between runs)
+
+| ID | Name | Scenario | Priority | Status |
+|----|------|----------|----------|--------|
+| B01 | plt_drop_column | Both have phone → k1_prime drops → soft-drop | P0 | **DONE** |
+| B02 | plt_add_column_all | No phone → Both add phone | P0 | **DONE** |
+| B03 | plt_type_widen_inline | salary INTEGER → Both BIGINT | P0 | **DONE** |
+| B04 | plt_no_narrow | salary NUMERIC(20,6) → Both NUMERIC(10,3) → blocked | P0 | **DONE** |
+| B05 | plt_drop_column_all | Both have phone → Both drop → soft-drop, new rows NULL | P0 | NEW |
+| B06 | plt_varchar_widen_inline | VARCHAR(100) → Both VARCHAR(200) | P1 | deferred |
+| B07 | plt_varchar_no_narrow_inline | VARCHAR(200) → Both VARCHAR(50) → blocked | P1 | deferred |
+| B08 | plt_type_conflict_inline | INTEGER → Both VARCHAR(100) | P1 | deferred |
+| B09 | plt_drop_readd_same_type | phone → drop → re-add same type | P2 | deferred |
+| B10 | plt_drop_readd_different_type | phone VARCHAR → drop → re-add NUMBER | P2 | deferred |
+| B11 | plt_asymmetric_evolution | k1 adds phone, k1_prime drops email | P1 | deferred |
+
+---
+
+## BRANCH C: Multi-Change Batch (many operations in one dbt run)
+
+| ID | Name | Scenario | Priority | Status |
+|----|------|----------|----------|--------|
+| C01 | plt_multi_change_10 | 7 simultaneous diffs in one run | P0 | NEW |
+| C02 | plt_multi_add_and_widen | 3 new cols + 1 type widen between runs | P1 | deferred |
+
+---
+
+## BRANCH D: PK / Merge Key Scenarios
+
+> Requires `resolve_merge_key` macro + `orders.sql` refactor (currently hardcoded `unique_key=['id', '__hevo_source_pipeline']`).
+
+| ID | Name | Scenario | Priority | Status |
+|----|------|----------|----------|--------|
+| D01 | plt_pk_mismatch_across_sources | k1 PK=[id], k1_prime PK=[id,category] → union merge key | P1 | NEW |
+| D02 | plt_no_pk_mixed_with_pk | k1 has PK, k1_prime has NO PK → mixed mode | P1 | NEW |
+| D03 | plt_pk_added_to_unkeyed | Both no-PK → both gain PK between runs | P2 | deferred |
+| D04 | plt_pk_dropped | Both have PK → both drop → APPEND fallback | P2 | deferred |
+| D05 | plt_pk_simple_to_composite | PK [id] → PK [id, category] between runs | P2 | deferred |
+| D06 | plt_pk_type_mismatch | k1 id=SMALLINT PK, k1_prime id=DECIMAL PK | P1 | NEW |
+
+---
+
+## BRANCH E: Constraint Scenarios
+
+| ID | Name | Scenario | Priority | Status |
+|----|------|----------|----------|--------|
+| E01 | plt_not_null_mismatch | k1 mobile NOT NULL, k1_prime nullable → final nullable | P1 | deferred |
+| E02 | plt_not_null_source_adds | k1 adds NOT NULL between runs → NOT propagated | P2 | deferred |
+| E03 | plt_not_null_all_agree | Both NOT NULL → enforce on final | P2 | deferred |
+
+---
+
+## BRANCH F: Edge Cases
+
+| ID | Name | Scenario | Priority | Status |
+|----|------|----------|----------|--------|
+| F01 | plt_hevo_temp_columns_filtered | `__HEVO__*__TEMP` cols in staging filtered out | P0 | NEW |
+| F02 | plt_source_table_disappears | k1_prime staging dropped between runs (**reveals bug**) | P0 | deferred (needs bug fix first) |
+| F03 | plt_empty_source_table | k1_prime has 0 rows, valid schema | P1 | deferred |
+| F04 | plt_empty_source_with_extra_column | k1_prime empty but has extra column | P1 | deferred |
+| F05 | plt_duplicate_ids_across_sources | k1 and k1_prime both have id=1,2,3 | P0 | NEW |
+| F06 | plt_idempotent_rerun | dbt run twice on same data → no duplicates | P0 | NEW |
+| F07 | plt_three_sources | Third source k1_double_prime | P2 | deferred |
+| F08 | plt_large_column_count | 50+ columns across sources | P2 | deferred |
+| F09 | plt_case_sensitivity | Mixed-case column names | P1 | deferred |
+| F10 | plt_special_characters_in_data | NaN, Infinity in FLOAT → VARCHAR | P2 | deferred |
+
+### Known Bug: F02 — `generate_source_select` has no None guard
+If `adapter.get_relation()` returns `None` (table dropped), `adapter.get_columns_in_relation(None)` will error. Also `orders.sql` always emits `UNION ALL` for all sources regardless. Both need None guards before F02 can be tested.
+
+---
+
+## BRANCH G: Snowflake-Specific
+
+| ID | Name | Scenario | Priority | Status |
+|----|------|----------|----------|--------|
+| G01 | plt_snowflake_varchar_16mb | VARCHAR(16777216) max length | P2 | deferred |
+| G02 | plt_snowflake_number_38_0 | NUMBER(38,0) identity — no unnecessary ALTER | P2 | deferred |
+
+---
+
+## Phase 1 Implementation Plan (11 new tests + macro work)
+
+### Step 1: New Branch A Tests (3 tests, no macro changes needed)
+
+#### TEST A05 — plt_type_widen_varchar
 **Branch**: A — cross-source drift
-**Scenario**: k1 has no `phone`, k1_prime has `phone`. PLT adds column to final table, NULL-pads k1 rows.
-**Status**: SQL + suite YAML + test already exist. Just needs `run_dbt()` call + assertions added to test.
+**Scenario**: k1 `name = VARCHAR(100)`, k1_prime `name = VARCHAR(500)`. PLT resolves to VARCHAR(500).
 
-### Files
-| File | Action |
-|------|--------|
-| `sql_data_files/plt_add_column/plt_add_column.sql` | exists |
-| `suites/post_load_transformations/plt_add_column.yml` | exists |
-| `tests/post_load_transformations/test_plt_add_column.py` | UPDATE — add `run_dbt()` + assertions |
-
-### Source schemas
+**Source schemas**:
 | Schema | Columns |
 |--------|---------|
-| k1 | id, name, mobile, email, salary |
-| k1_prime | id, name, mobile, email, salary, **phone** |
+| k1 | id PK, name VARCHAR(100), salary NUMERIC(15,2) |
+| k1_prime | id PK, name VARCHAR(500), salary NUMERIC(15,2) |
 
-### Test flow
-1. Wait for historical load → COMPLETED
-2. `_discover_schemas` → `vars_dict`
-3. `run_dbt(vars_dict)` — creates final table
-4. Assert:
-   - `COUNT(*) FROM PLT_FINAL.ORDERS` == 6
-   - k1 rows: `PHONE IS NULL`
-   - k1_prime rows: `PHONE IS NOT NULL`
-   - `PHONE` column exists in `INFORMATION_SCHEMA.COLUMNS`
+k1_prime should have a row with a 300+ char name to verify no truncation.
 
-### Macros needed
-None — existing macros handle ADD_COLUMN already.
+**Asserts**:
+- NAME column CHARACTER_MAXIMUM_LENGTH >= 500 in INFORMATION_SCHEMA
+- k1_prime 300-char name preserved in final table
+- Count = 6
+
+**Files**: `sql_data_files/plt_type_widen_varchar/plt_type_widen_varchar.sql`, `suites/.../plt_type_widen_varchar.yml`, `tests/.../test_plt_type_widen_varchar.py`
 
 ---
 
-## TEST 2 — plt_drop_column
-
+#### TEST A06 — plt_add_multiple_columns
 **Branch**: A — cross-source drift
-**Scenario**: k1 HAS `phone`, k1_prime does NOT. PLT keeps `phone` in final table (soft-drop); k1_prime rows get NULL.
+**Scenario**: k1_prime has 3 extra columns (phone, address, city).
 
-### Files
-| File | Action |
-|------|--------|
-| `sql_data_files/plt_drop_column/plt_drop_column.sql` | NEW |
-| `suites/post_load_transformations/plt_drop_column.yml` | NEW |
-| `tests/post_load_transformations/test_plt_drop_column.py` | NEW |
-
-### Source schemas
+**Source schemas**:
 | Schema | Columns |
 |--------|---------|
-| k1 | id, name, mobile, email, salary, **phone** |
-| k1_prime | id, name, mobile, email, salary |
+| k1 | id PK, name, salary |
+| k1_prime | id PK, name, salary, **phone**, **address**, **city** |
 
-### SQL (`plt_drop_column.sql`)
-```sql
-CREATE SCHEMA IF NOT EXISTS k1;
-DROP TABLE IF EXISTS k1.orders;
-CREATE TABLE k1.orders (
-    id BIGSERIAL PRIMARY KEY, name VARCHAR(255), mobile VARCHAR(50),
-    email VARCHAR(255), salary NUMERIC(15,2), phone VARCHAR(50)
-);
-INSERT INTO k1.orders (name, mobile, email, salary, phone) VALUES
-    ('Alice','555-1001','alice@example.com',75000,'555-AAA'),
-    ('Bob','555-1002','bob@example.com',80000,'555-BBB'),
-    ('Carol','555-1003','carol@example.com',65000,'555-CCC');
-
-CREATE SCHEMA IF NOT EXISTS k1_prime;
-DROP TABLE IF EXISTS k1_prime.orders;
-CREATE TABLE k1_prime.orders (
-    id BIGSERIAL PRIMARY KEY, name VARCHAR(255), mobile VARCHAR(50),
-    email VARCHAR(255), salary NUMERIC(15,2)
-    -- no phone column
-);
-INSERT INTO k1_prime.orders (name, mobile, email, salary) VALUES
-    ('Charlie','555-2001','charlie@example.com',90000),
-    ('Diana','555-2002','diana@example.com',85000),
-    ('Eve','555-2003','eve@example.com',92000);
-```
-
-### Test flow
-1. Wait for historical load → COMPLETED
-2. `_discover_schemas` → `vars_dict`
-3. `run_dbt(vars_dict)`
-4. Assert:
-   - `COUNT(*) FROM PLT_FINAL.ORDERS` == 6
-   - `COUNT(*) WHERE PHONE IS NOT NULL` == 3 (k1 rows)
-   - `COUNT(*) WHERE PHONE IS NULL` == 3 (k1_prime rows)
-   - `PHONE` column exists in `INFORMATION_SCHEMA.COLUMNS`
-
-### Macros needed
-None — `resolve_column_schema` picks up PHONE from k1; `generate_source_select` NULL-pads k1_prime.
+**Asserts**:
+- All 3 extra columns exist in INFORMATION_SCHEMA
+- k1 rows: all 3 are NULL
+- k1_prime rows: all 3 are NOT NULL
+- Count = 6
 
 ---
 
-## TEST 3 — plt_column_name_mismatch
+#### TEST A07 — plt_add_column_plus_type_drift
+**Branch**: A — cross-source drift (compound scenario)
+**Scenario**: k1_prime adds phone AND has wider salary NUMERIC(15,6) vs k1's NUMERIC(10,3).
 
-**Branch**: A — cross-source drift
-**Scenario**: k1 has `mobile` (no `phone`), k1_prime has `phone` (no `mobile`). PLT treats them as two separate columns. Final table has both; cross-NULL pattern.
-
-### Files
-| File | Action |
-|------|--------|
-| `sql_data_files/plt_column_name_mismatch/plt_column_name_mismatch.sql` | NEW |
-| `suites/post_load_transformations/plt_column_name_mismatch.yml` | NEW |
-| `tests/post_load_transformations/test_plt_column_name_mismatch.py` | NEW |
-
-### Source schemas
+**Source schemas**:
 | Schema | Columns |
 |--------|---------|
-| k1 | id, name, **mobile**, email, salary |
-| k1_prime | id, name, **phone**, email, salary |
+| k1 | id PK, name, salary NUMERIC(10,3) |
+| k1_prime | id PK, name, salary NUMERIC(15,6), **phone** |
 
-### SQL (`plt_column_name_mismatch.sql`)
-```sql
-CREATE SCHEMA IF NOT EXISTS k1;
-DROP TABLE IF EXISTS k1.orders;
-CREATE TABLE k1.orders (
-    id BIGSERIAL PRIMARY KEY, name VARCHAR(255), mobile VARCHAR(50),
-    email VARCHAR(255), salary NUMERIC(15,2)
-);
-INSERT INTO k1.orders (name, mobile, email, salary) VALUES
-    ('Alice','555-1001','alice@example.com',75000),
-    ('Bob','555-1002','bob@example.com',80000),
-    ('Carol','555-1003','carol@example.com',65000);
-
-CREATE SCHEMA IF NOT EXISTS k1_prime;
-DROP TABLE IF EXISTS k1_prime.orders;
-CREATE TABLE k1_prime.orders (
-    id BIGSERIAL PRIMARY KEY, name VARCHAR(255), phone VARCHAR(50),
-    email VARCHAR(255), salary NUMERIC(15,2)
-    -- phone instead of mobile
-);
-INSERT INTO k1_prime.orders (name, phone, email, salary) VALUES
-    ('Charlie','555-2001','charlie@example.com',90000),
-    ('Diana','555-2002','diana@example.com',85000),
-    ('Eve','555-2003','eve@example.com',92000);
-```
-
-### Test flow
-1. Wait for historical load → COMPLETED
-2. `_discover_schemas` → `vars_dict`
-3. `run_dbt(vars_dict)`
-4. Assert:
-   - Both `MOBILE` and `PHONE` columns exist in `INFORMATION_SCHEMA.COLUMNS`
-   - k1 rows: `MOBILE IS NOT NULL`, `PHONE IS NULL`
-   - k1_prime rows: `PHONE IS NOT NULL`, `MOBILE IS NULL`
-   - `COUNT(*) FROM PLT_FINAL.ORDERS` == 6
-
-### Macros needed
-None — unified schema = union of {MOBILE, PHONE, ...}; NULL-padding handles the rest.
+**Asserts**:
+- PHONE column added, k1 rows NULL
+- SALARY widened to NUMBER(15,6)
+- k1_prime high-precision value preserved
+- Count = 6
 
 ---
 
-## TEST 4 — plt_type_widen_safe
+### Step 2: New Branch B Test (1 test)
 
-**Branch**: A — cross-source drift
-**Scenario**: k1 `salary = NUMERIC(10,3)`, k1_prime `salary = NUMERIC(15,6)`. PLT resolves to NUMERIC(15,6) — safe widening. Final table column type is altered.
-
-### Files
-| File | Action |
-|------|--------|
-| `sql_data_files/plt_type_widen_safe/plt_type_widen_safe.sql` | NEW |
-| `suites/post_load_transformations/plt_type_widen_safe.yml` | NEW |
-| `tests/post_load_transformations/test_plt_type_widen_safe.py` | NEW |
-
-### Source schemas
-| Schema | Columns |
-|--------|---------|
-| k1 | id, name, salary **NUMERIC(10,3)** |
-| k1_prime | id, name, salary **NUMERIC(15,6)** |
-
-### SQL (`plt_type_widen_safe.sql`)
-```sql
-CREATE SCHEMA IF NOT EXISTS k1;
-DROP TABLE IF EXISTS k1.orders;
-CREATE TABLE k1.orders (id BIGSERIAL PRIMARY KEY, name VARCHAR(255), salary NUMERIC(10,3));
-INSERT INTO k1.orders (name, salary) VALUES
-    ('Alice',75000.123), ('Bob',80000.456), ('Carol',65000.789);
-
-CREATE SCHEMA IF NOT EXISTS k1_prime;
-DROP TABLE IF EXISTS k1_prime.orders;
-CREATE TABLE k1_prime.orders (id BIGSERIAL PRIMARY KEY, name VARCHAR(255), salary NUMERIC(15,6));
-INSERT INTO k1_prime.orders (name, salary) VALUES
-    ('Charlie',90000.123456), ('Diana',85000.654321), ('Eve',92000.000001);
-```
-
-### Test flow
-1. Wait for historical load → COMPLETED
-2. `_discover_schemas` → `vars_dict`
-3. `run_dbt(vars_dict)`
-4. Assert:
-   - `SALARY` column type in `INFORMATION_SCHEMA.COLUMNS` is `NUMBER` with `NUMERIC_PRECISION=15`, `NUMERIC_SCALE=6`
-   - All 6 rows have non-NULL salary
-   - k1_prime row with `90000.123456` is not truncated
-
-### Macros needed
-- NEW `get_widened_type` — NUMBER(10,3) + NUMBER(15,6) → NUMBER(15,6)
-- UPDATE `resolve_column_schema` — call `get_widened_type` on repeated column names
-
----
-
-## TEST 5 — plt_type_conflict
-
-**Branch**: A — cross-source drift
-**Scenario**: k1 `salary = FLOAT`, k1_prime `salary = NUMERIC(10,3)`. Cross-family conflict → VARCHAR(256) fallback.
-
-### Files
-| File | Action |
-|------|--------|
-| `sql_data_files/plt_type_conflict/plt_type_conflict.sql` | NEW |
-| `suites/post_load_transformations/plt_type_conflict.yml` | NEW |
-| `tests/post_load_transformations/test_plt_type_conflict.py` | NEW |
-
-### Source schemas
-| Schema | Columns |
-|--------|---------|
-| k1 | id, name, salary **FLOAT** |
-| k1_prime | id, name, salary **NUMERIC(10,3)** |
-
-### SQL (`plt_type_conflict.sql`)
-```sql
-CREATE SCHEMA IF NOT EXISTS k1;
-DROP TABLE IF EXISTS k1.orders;
-CREATE TABLE k1.orders (id BIGSERIAL PRIMARY KEY, name VARCHAR(255), salary FLOAT);
-INSERT INTO k1.orders (name, salary) VALUES
-    ('Alice',75000.5), ('Bob',80000.25), ('Carol',65000.75);
-
-CREATE SCHEMA IF NOT EXISTS k1_prime;
-DROP TABLE IF EXISTS k1_prime.orders;
-CREATE TABLE k1_prime.orders (id BIGSERIAL PRIMARY KEY, name VARCHAR(255), salary NUMERIC(10,3));
-INSERT INTO k1_prime.orders (name, salary) VALUES
-    ('Charlie',90000.123), ('Diana',85000.456), ('Eve',92000.789);
-```
-
-### Test flow
-1. Wait for historical load → COMPLETED
-2. `_discover_schemas` → `vars_dict`
-3. `run_dbt(vars_dict)`
-4. Assert:
-   - `SALARY` column type in `INFORMATION_SCHEMA.COLUMNS` is `TEXT` or `VARCHAR`
-   - All 6 rows have non-NULL salary as string values
-   - e.g. `'75000.5'` and `'90000.123'` are readable as strings
-
-### Macros needed
-- `get_widened_type` — FLOAT + NUMBER → VARCHAR(256) (conflict path)
-- UPDATE `resolve_column_schema` (same change as TEST 4)
-- UPDATE `evolve_final_table` — ALTER COLUMN type when unified type differs from final table's current type
-
----
-
-## TEST 6 — plt_add_column_all
-
+#### TEST B05 — plt_drop_column_all
 **Branch**: B — consistent evolution
-**Scenario**: Both k1 and k1_prime gain `phone` after the first DBT run. Final table was created without it. Second DBT run must ADD COLUMN and populate all rows.
+**Scenario**: Both sources have phone in base state. Between runs, both drop phone. PLT soft-drop: column stays, new rows get NULL.
 
-### Files
-| File | Action |
-|------|--------|
-| `sql_data_files/plt_add_column_all/base.sql` | NEW |
-| `sql_data_files/plt_add_column_all/alter.sql` | NEW |
-| `suites/post_load_transformations/plt_add_column_all.yml` | NEW (init_sql_data_files → base.sql) |
-| `tests/post_load_transformations/test_plt_add_column_all.py` | NEW |
-
-### Source schemas
+**Source schemas**:
 | State | k1 | k1_prime |
 |-------|-----|---------|
-| base.sql | id, name, salary | id, name, salary |
-| alter.sql | + phone | + phone |
+| base.sql | id, name, salary, phone | id, name, salary, phone |
+| alter.sql | INSERT new row + DROP phone | INSERT new row + DROP phone |
 
-### SQL (`base.sql`)
-```sql
-CREATE SCHEMA IF NOT EXISTS k1;
-DROP TABLE IF EXISTS k1.orders;
-CREATE TABLE k1.orders (id BIGSERIAL PRIMARY KEY, name VARCHAR(255), salary NUMERIC(15,2));
-INSERT INTO k1.orders (name, salary) VALUES
-    ('Alice',75000), ('Bob',80000), ('Carol',65000);
-
-CREATE SCHEMA IF NOT EXISTS k1_prime;
-DROP TABLE IF EXISTS k1_prime.orders;
-CREATE TABLE k1_prime.orders (id BIGSERIAL PRIMARY KEY, name VARCHAR(255), salary NUMERIC(15,2));
-INSERT INTO k1_prime.orders (name, salary) VALUES
-    ('Charlie',90000), ('Diana',85000), ('Eve',92000);
-```
-
-### SQL (`alter.sql`)
-```sql
-ALTER TABLE k1.orders ADD COLUMN phone VARCHAR(50);
-UPDATE k1.orders SET phone = '555-100' || id::text;
-
-ALTER TABLE k1_prime.orders ADD COLUMN phone VARCHAR(50);
-UPDATE k1_prime.orders SET phone = '555-200' || id::text;
-```
-
-### Test flow
-1. Wait for historical load → COMPLETED
-2. `_discover_schemas` → `vars_dict`
-3. `run_dbt(vars_dict)` — **DBT run 1**: final table created WITHOUT phone
-4. Assert `PHONE` column does NOT exist in `INFORMATION_SCHEMA.COLUMNS` (pre-evolution baseline)
-5. `fi.source.run_sql_data_file(["sql_data_files/plt_add_column_all/alter.sql"])` — evolves both Postgres schemas
-6. Trigger incremental job + wait COMPLETED — staging schemas now have phone
-7. `run_dbt(vars_dict)` — **DBT run 2**: `evolve_final_table` adds PHONE; all rows populated
-8. Assert:
-   - `PHONE` column now exists
-   - `COUNT(*) WHERE PHONE IS NULL` == 0 (all rows have phone — both sources have it)
-   - `COUNT(*) FROM PLT_FINAL.ORDERS` == 6
-
-### Macros needed
-None beyond the changes in TEST 4 (evolve_final_table ADD COLUMN path already works).
+**Test flow**:
+1. Historical load → COMPLETED
+2. DBT run 1 → all rows have phone
+3. Assert: all rows PHONE IS NOT NULL
+4. Run alter.sql → both drop phone + insert new rows
+5. Incremental job → COMPLETED
+6. DBT run 2 → phone column kept (soft-drop)
+7. Assert: PHONE column still exists, run-1 rows retain phone, run-2 rows PHONE IS NULL
 
 ---
 
-## TEST 7 — plt_type_widen_inline
+### Step 3: Multi-Change Integration (1 test)
 
-**Branch**: B — consistent evolution
-**Scenario**: Both k1 and k1_prime change `salary` from INTEGER to BIGINT. Final table has INTEGER. Second DBT run must ALTER COLUMN type to BIGINT.
+#### TEST C01 — plt_multi_change_10
+**Branch**: C — multi-change batch
+**Scenario**: 7 simultaneous schema diffs between k1 and k1_prime in a single dbt run.
 
-### Files
-| File | Action |
-|------|--------|
-| `sql_data_files/plt_type_widen_inline/base.sql` | NEW |
-| `sql_data_files/plt_type_widen_inline/alter.sql` | NEW |
-| `suites/post_load_transformations/plt_type_widen_inline.yml` | NEW |
-| `tests/post_load_transformations/test_plt_type_widen_inline.py` | NEW |
+**Source schemas**:
+| Column | k1 | k1_prime | Evolution |
+|--------|-----|---------|-----------|
+| id | PK | PK | — |
+| name | VARCHAR(255) | VARCHAR(255) | — |
+| salary | NUMERIC(15,2) | NUMERIC(15,2) | — |
+| department | VARCHAR(100) | _(absent)_ | drop equivalent |
+| bonus | DECIMAL(15,2) | DECIMAL(15,2) | same — no change |
+| hire_date | DATE | _(absent)_ | name mismatch with test_date |
+| test_date | _(absent)_ | DATE | name mismatch with hire_date |
+| code | INTEGER | BIGINT | type widen |
+| city | VARCHAR(100) | VARCHAR(500) | VARCHAR widen |
+| amount | FLOAT | NUMERIC(10,3) | conflict → VARCHAR |
+| region | _(absent)_ | VARCHAR(100) | add equivalent |
 
-### Source schemas
-| State | k1 salary | k1_prime salary |
-|-------|-----------|----------------|
-| base.sql | INTEGER | INTEGER |
-| alter.sql | BIGINT | BIGINT |
-
-### SQL (`alter.sql`)
-```sql
-ALTER TABLE k1.orders ALTER COLUMN salary TYPE BIGINT;
-ALTER TABLE k1_prime.orders ALTER COLUMN salary TYPE BIGINT;
-```
-
-### Test flow
-1. Historical + wait COMPLETED
-2. `_discover_schemas` → `vars_dict`
-3. `run_dbt(vars_dict)` — **DBT run 1**: final table salary is NUMBER (INTEGER in Snowflake → NUMBER(38,0))
-4. Record salary column precision/scale as baseline
-5. `fi.source.run_sql_data_file(["sql_data_files/plt_type_widen_inline/alter.sql"])`
-6. Incremental job + wait COMPLETED
-7. `run_dbt(vars_dict)` — **DBT run 2**: `evolve_final_table` detects BIGINT > INTEGER → `ALTER COLUMN salary SET DATA TYPE BIGINT`
-8. Assert:
-   - salary column type is NUMBER(38,0) or BIGINT equivalent
-   - All 6 rows have salary values (no data loss)
-
-### Macros needed
-- UPDATE `evolve_final_table` — type ALTER logic: `ALTER TABLE t ALTER COLUMN col SET DATA TYPE new_type`
-- `get_widened_type` used in `resolve_column_schema` detects widening correctly
+**Asserts**:
+- DEPARTMENT exists (from k1), k1_prime rows NULL
+- BONUS exists, both non-NULL
+- HIRE_DATE and TEST_DATE both exist (name mismatch = two columns)
+- CODE widened to NUMBER (BIGINT equivalent)
+- CITY is VARCHAR(500+)
+- AMOUNT is VARCHAR/TEXT (conflict fallback)
+- REGION exists (from k1_prime), k1 rows NULL
+- Count = 6
 
 ---
 
-## TEST 8 — plt_no_narrow
+### Step 4: PK / Merge Key (3 tests + macro work)
 
-**Branch**: B — consistent evolution (narrowing attempt, PLT must refuse)
-**Scenario**: Both k1 and k1_prime change `salary` from NUMERIC(20,6) → NUMERIC(10,3). Final table has NUMERIC(20,6). PLT must detect narrowing and NOT alter the final table.
+#### Macro: `resolve_merge_key(sources)`
+**Path**: `macros/resolve_merge_key.sql`
+- Reads PK metadata from each source via `INFORMATION_SCHEMA.TABLE_CONSTRAINTS` + `KEY_COLUMN_USAGE`
+- Returns union of all source PKs + `__hevo_source_pipeline`
+- Handles: no PK → append mode, mismatched PKs → union, IS NOT DISTINCT FROM for nullable key cols
 
-### Files
+#### Model refactor: `orders.sql`
+- Replace hardcoded `unique_key=['id', '__hevo_source_pipeline']` with dynamic `resolve_merge_key` output
+- Add IS NOT DISTINCT FROM in MERGE ON clause for nullable key cols
+
+#### TEST D01 — plt_pk_mismatch_across_sources
+**Scenario**: k1 PK=[id], k1_prime PK=[id, category]. Union merge key = [id, category, __hevo_source_pipeline].
+
+**Source schemas**:
+| Schema | Columns | PK |
+|--------|---------|-----|
+| k1 | id, name, category, salary | id |
+| k1_prime | id, name, category, salary | (id, category) |
+
+k1_prime has rows with same `id` but different `category`. k1 rows have category values but category is NOT in k1's PK.
+
+**Asserts**:
+- k1 rows: category non-NULL but merge key uses IS NOT DISTINCT FROM for nullable PKs
+- All rows preserved (no merge collisions)
+- Count = 6+ (depending on k1_prime row design)
+
+#### TEST D02 — plt_no_pk_mixed_with_pk
+**Scenario**: k1 has PK `id`, k1_prime has NO PK.
+
+**Source schemas**:
+| Schema | Columns | PK |
+|--------|---------|-----|
+| k1 | id PK, name, salary | id |
+| k1_prime | id (no PK), name, salary | none |
+
+k1_prime may have duplicate ids.
+
+**Asserts**: PLT handles mixed mode — k1 uses MERGE, k1_prime uses dedup-in-SELECT or APPEND fallback. No Snowflake MERGE errors.
+
+#### TEST D06 — plt_pk_type_mismatch
+**Scenario**: k1 `id = SMALLINT PK`, k1_prime `id = DECIMAL(15,0) PK`.
+
+**Source schemas**:
+| Schema | Columns | PK |
+|--------|---------|-----|
+| k1 | id SMALLINT PK, name, salary | id |
+| k1_prime | id DECIMAL(15,0) PK, name, salary | id |
+
+**Asserts**: ID type widened to NUMBER(15,0) or wider. MERGE works. Count = 6.
+
+---
+
+### Step 5: Edge Cases (3 tests + bug fix)
+
+#### Bug Fix: `generate_source_select.sql` None guard
+Add check: if `adapter.get_relation()` returns None, skip that source. Also update `orders.sql` UNION ALL loop to skip None relations.
+
+#### TEST F01 — plt_hevo_temp_columns_filtered
+**Scenario**: Staging table has leftover `__HEVO__SALARY__TEMP` column from interrupted promotion.
+
+**Note**: The Hevo loader wouldn't create such columns in staging — they only appear from interrupted type promotions on the destination. Two options:
+1. INSERT directly into Snowflake staging post-load to add the column (requires destination DDL in test)
+2. Test `resolve_column_schema` filtering as a dbt unit test
+
+**Asserts**: `__HEVO__SALARY__TEMP` does NOT appear in final table.
+
+#### TEST F05 — plt_duplicate_ids_across_sources
+**Scenario**: k1 has id=1,2,3 and k1_prime also has id=1,2,3 with different names.
+
+**Source schemas**:
+| Schema | Rows |
+|--------|------|
+| k1 | (1, Alice), (2, Bob), (3, Carol) |
+| k1_prime | (1, Charlie), (2, Diana), (3, Eve) |
+
+**Asserts**: 6 rows in final (not 3). Composite key `[id, __hevo_source_pipeline]` keeps both sources' rows.
+
+#### TEST F06 — plt_idempotent_rerun
+**Scenario**: Run dbt twice on same data, no changes between runs.
+
+Can reuse A01's SQL data. Just call `run_dbt()` twice.
+
+**Asserts**: After run 2: count still = 6, no duplicates, no schema changes. `evolve_final_table` is a no-op on second run.
+
+---
+
+### Step 6: NOT NULL Enhancement (macro changes)
+
+**Macro changes**:
+- `resolve_column_schema.sql`: Track `is_nullable` per column across all sources via `IS_NULLABLE` from INFORMATION_SCHEMA
+- `evolve_final_table.sql`: When adding a new column, if ALL sources have it as NOT NULL, add with NOT NULL constraint. Otherwise add as nullable.
+- Dedicated tests (E01-E03) deferred to Phase 2.
+
+---
+
+## Key Files to Modify/Create
+
 | File | Action |
 |------|--------|
-| `sql_data_files/plt_no_narrow/base.sql` | NEW |
-| `sql_data_files/plt_no_narrow/alter.sql` | NEW |
-| `suites/post_load_transformations/plt_no_narrow.yml` | NEW |
-| `tests/post_load_transformations/test_plt_no_narrow.py` | NEW |
-
-### Source schemas
-| State | k1 salary | k1_prime salary |
-|-------|-----------|----------------|
-| base.sql | NUMERIC(20,6) | NUMERIC(20,6) |
-| alter.sql | NUMERIC(10,3) | NUMERIC(10,3) |
-
-### SQL (`alter.sql`)
-```sql
--- Postgres requires DROP + ADD for narrowing
-ALTER TABLE k1.orders DROP COLUMN salary;
-ALTER TABLE k1.orders ADD COLUMN salary NUMERIC(10,3);
-UPDATE k1.orders SET salary = 75000.123;
-
-ALTER TABLE k1_prime.orders DROP COLUMN salary;
-ALTER TABLE k1_prime.orders ADD COLUMN salary NUMERIC(10,3);
-UPDATE k1_prime.orders SET salary = 90000.456;
-```
-
-### Test flow
-1. Historical + wait COMPLETED
-2. `_discover_schemas` → `vars_dict`
-3. `run_dbt(vars_dict)` — **DBT run 1**: final table salary is NUMBER(20,6)
-4. Record baseline: `NUMERIC_PRECISION=20`, `NUMERIC_SCALE=6`
-5. `fi.source.run_sql_data_file(["sql_data_files/plt_no_narrow/alter.sql"])`
-6. Incremental job + wait COMPLETED
-7. `run_dbt(vars_dict)` — **DBT run 2**: `evolve_final_table` detects NUMERIC(10,3) < NUMERIC(20,6) → logs skip, no ALTER
-8. Assert:
-   - salary column type is STILL NUMBER(20,6) — `NUMERIC_PRECISION=20`, `NUMERIC_SCALE=6`
-   - All 6 rows have salary values
-
-### Macros needed
-- `evolve_final_table` narrowing detection: compare `get_widened_type(unified_type, current_final_type)` — if result == current_final_type then unified is narrower → skip ALTER
+| `sentinel-tests/.../sql_data_files/plt_*/` | Create 8 new SQL data dirs |
+| `sentinel-tests/.../suites/.../plt_*.yml` | Create 8 new suite YAMLs |
+| `sentinel-tests/.../tests/.../test_plt_*.py` | Create 8 new test files |
+| `sentinel-tests/.../suites/.../plt_all.yml` | Add 11 new entries |
+| `plt-poc-dbt/macros/resolve_merge_key.sql` | **NEW** — dynamic PK resolution |
+| `plt-poc-dbt/macros/generate_source_select.sql` | **FIX** — None guard for disappeared tables |
+| `plt-poc-dbt/macros/resolve_column_schema.sql` | **ENHANCE** — nullability tracking |
+| `plt-poc-dbt/macros/evolve_final_table.sql` | **ENHANCE** — NOT NULL when all agree |
+| `plt-poc-dbt/models/plt/orders.sql` | **REFACTOR** — dynamic unique_key + None guard |
 
 ---
 
@@ -463,15 +377,30 @@ UPDATE k1_prime.orders SET salary = 90000.456;
 
 | Step | Task | Dependency |
 |------|------|------------|
-| 1 | `plt_runner.py` shared utility | — |
-| 2 | Update `test_plt_add_column.py` + assertions (TEST 1) | plt_runner.py |
-| 3 | `get_widened_type.sql` macro | — |
-| 4 | Update `resolve_column_schema.sql` | get_widened_type |
-| 5 | TEST 2: plt_drop_column | resolve_column_schema update |
-| 6 | TEST 3: plt_column_name_mismatch | resolve_column_schema update |
-| 7 | TEST 4: plt_type_widen_safe | get_widened_type + resolve_column_schema |
-| 8 | TEST 5: plt_type_conflict | get_widened_type + resolve_column_schema |
-| 9 | Update `evolve_final_table.sql` — type ALTER + narrowing skip | get_widened_type |
-| 10 | TEST 6: plt_add_column_all | evolve_final_table update |
-| 11 | TEST 7: plt_type_widen_inline | evolve_final_table type ALTER |
-| 12 | TEST 8: plt_no_narrow | evolve_final_table narrowing skip |
+| 1 | A05: plt_type_widen_varchar | — |
+| 2 | A06: plt_add_multiple_columns | — |
+| 3 | A07: plt_add_column_plus_type_drift | — |
+| 4 | B05: plt_drop_column_all | — |
+| 5 | C01: plt_multi_change_10 | — |
+| 6 | `resolve_merge_key.sql` macro | — |
+| 7 | `orders.sql` refactor (dynamic unique_key) | resolve_merge_key |
+| 8 | D01: plt_pk_mismatch_across_sources | resolve_merge_key + model refactor |
+| 9 | D02: plt_no_pk_mixed_with_pk | resolve_merge_key + model refactor |
+| 10 | D06: plt_pk_type_mismatch | resolve_merge_key + model refactor |
+| 11 | Bug fix: generate_source_select None guard | — |
+| 12 | F01: plt_hevo_temp_columns_filtered | — |
+| 13 | F05: plt_duplicate_ids_across_sources | — |
+| 14 | F06: plt_idempotent_rerun | — |
+| 15 | NOT NULL enhancement (resolve_column_schema + evolve_final_table) | — |
+
+---
+
+## Deferred to Phase 2
+
+- A08-A14 (type evolution matrix: DATE→TIMESTAMP, BOOL→NUMBER, NTZ→TZ, etc.)
+- B06-B11 (VARCHAR widen/narrow inline, drop+readd, type conflict inline, asymmetric)
+- C02 (multi-change variant)
+- D03-D05 (PK lifecycle: added, dropped, simple→composite)
+- E01-E03 (dedicated NOT NULL constraint tests)
+- F02-F04, F07-F10 (source disappears, empty sources, 3 sources, wide tables, case sensitivity)
+- G01-G02 (Snowflake-specific)
