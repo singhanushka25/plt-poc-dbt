@@ -7,55 +7,43 @@
     k1_prime_schema  Temp schema written by pipeline k1_prime
     k1_table         Table name (same in both schemas, e.g. ORDERS)
 
-  What this model does:
-    1. resolve_column_schema  — inspects INFORMATION_SCHEMA on both temp tables
-                                and computes the union of all columns.
-    2. evolve_final_table     — for each column in the union that is missing
-                                from PLT_FINAL.orders, issues ALTER TABLE ADD COLUMN.
-    3. generate_source_select — builds a SELECT per source, NULL-padding any
-                                column that the source does not have.
-    4. UNION ALL              — combines the per-source SELECTs.
-    5. MERGE (DBT built-in)   — DBT's incremental materialization wraps the
-                                UNION ALL in a Snowflake MERGE INTO statement
-                                keyed on (id, __hevo_source_pipeline).
+  What this model does (v3 macro engine):
+    1. plt_resolve_schema   — introspects all source schemas via adapter +
+                              INFORMATION_SCHEMA, computes unified LCA types
+    2. plt_evolve_table     — DDL to align final table with unified schema
+                              (soft-drop, column swap, NOT NULL management)
+    3. plt_generate_union   — UNION ALL with TRY_CAST + NULL-pad
+    4. MERGE (dbt built-in) — incremental merge handles INSERT/UPDATE
 
   To add a new source pipeline in the future, append one dict to plt_sources.
   The macros handle everything else dynamically.
 #}
 
+{{ config(
+    materialized='incremental',
+    unique_key=['id', '__hevo_source_pipeline'],
+    incremental_strategy='merge'
+) }}
+
 {% set plt_sources = [
-  {
-    'database': var('k1_db'),
-    'schema':   var('k1_schema'),
-    'table':    var('k1_table'),
-    'label':    'k1'
-  },
-  {
-    'database': var('k1_db'),
-    'schema':   var('k1_prime_schema'),
-    'table':    var('k1_table'),
-    'label':    'k1_prime'
-  }
+  {'database': var('k1_db'), 'schema': var('k1_schema'), 'table': var('k1_table'), 'label': 'k1'},
+  {'database': var('k1_db'), 'schema': var('k1_prime_schema'), 'table': var('k1_table'), 'label': 'k1_prime'}
 ] %}
 
-{{
-  config(
-    materialized         = 'incremental',
-    unique_key           = ['id', '__hevo_source_pipeline'],
-    incremental_strategy = 'merge'
-  )
-}}
+{# Step 1: Resolve unified schema across all sources #}
+{% set result = plt_resolve_schema(plt_sources) %}
+{% set unified = result['unified'] %}
+{% set source_columns = result['source_columns'] %}
 
-{# Step 1: Resolve the unified column schema across all source temp tables #}
-{% set unified_cols = resolve_column_schema(plt_sources) %}
-
-{# Step 2: Evolve the final table — ADD COLUMN for anything new in the sources #}
-{% do evolve_final_table(this, unified_cols) %}
-
-{# Step 3 + 4: UNION ALL — each source SELECT is NULL-padded to the unified schema #}
-{% for src in plt_sources %}
-{{ generate_source_select(src, unified_cols) }}
-{%- if not loop.last %}
-UNION ALL
+{# Guard: abort if no sources exist #}
+{% if unified | length == 0 %}
+  {{ exceptions.raise_compiler_error("PLT: No active sources found — cannot generate model.") }}
 {% endif %}
-{% endfor %}
+
+{# Step 2: Evolve final table DDL (incremental only — first run creates from SELECT) #}
+{% if is_incremental() %}
+  {% do plt_evolve_table(this, unified) %}
+{% endif %}
+
+{# Step 3: Generate UNION ALL with TRY_CAST + NULL-pad #}
+{{ plt_generate_union(plt_sources, unified, source_columns) }}

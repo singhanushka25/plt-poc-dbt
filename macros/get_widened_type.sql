@@ -2,7 +2,7 @@
   {#
     Returns the wider of two Snowflake type strings.
     Inputs:  raw dtype strings, e.g. "NUMBER(10,3)", "VARCHAR(100)", "FLOAT"
-    Output:  wider type string, or VARCHAR(256) on cross-family conflict
+    Output:  wider type string, or VARCHAR(16777216) on cross-family conflict
   #}
 
   {# Normalise: uppercase, strip spaces #}
@@ -40,8 +40,9 @@
         {% set ta_s = ta_params.split(',')[1] | int if ',' in ta_params else 0 %}
         {% set tb_p = tb_params.split(',')[0] | int %}
         {% set tb_s = tb_params.split(',')[1] | int if ',' in tb_params else 0 %}
-        {% set p = [ta_p, tb_p] | max %}
         {% set s = [ta_s, tb_s] | max %}
+        {% set int_digits = [ta_p - ta_s, tb_p - tb_s] | max %}
+        {% set p = int_digits + s %}
         {{ return('NUMBER(' ~ p ~ ',' ~ s ~ ')') }}
       {% elif ta_params %}
         {{ return(type_a) }}
@@ -104,19 +105,28 @@
     {{ return(type_a) }}
   {% endif %}
 
-  {# TIMESTAMP_NTZ / TIMESTAMP → TIMESTAMP_TZ #}
-  {% if ta_base in ('TIMESTAMP_NTZ','TIMESTAMP') and tb_base == 'TIMESTAMP_TZ' %}
+  {# TIMESTAMP_LTZ → TIMESTAMP_TZ (child → parent) #}
+  {# TIMESTAMP_NTZ / TIMESTAMP → TIMESTAMP_TZ (child → parent) #}
+  {% if ta_base in ('TIMESTAMP_NTZ', 'TIMESTAMP', 'TIMESTAMP_LTZ') and tb_base == 'TIMESTAMP_TZ' %}
     {{ return(type_b) }}
   {% endif %}
-  {% if tb_base in ('TIMESTAMP_NTZ','TIMESTAMP') and ta_base == 'TIMESTAMP_TZ' %}
+  {% if tb_base in ('TIMESTAMP_NTZ', 'TIMESTAMP', 'TIMESTAMP_LTZ') and ta_base == 'TIMESTAMP_TZ' %}
     {{ return(type_a) }}
   {% endif %}
 
-  {# BOOLEAN → numeric types #}
-  {% if ta_base == 'BOOLEAN' and tb_base in ('NUMBER','NUMERIC','DECIMAL','INT','INTEGER','BIGINT','SMALLINT','FLOAT','DOUBLEPRECISION','REAL') %}
+  {# TIMESTAMP_NTZ + TIMESTAMP_LTZ → TIMESTAMP_TZ (siblings, LCA is TZ) #}
+  {% if ta_base in ('TIMESTAMP_NTZ', 'TIMESTAMP') and tb_base == 'TIMESTAMP_LTZ' %}
+    {{ return('TIMESTAMP_TZ') }}
+  {% endif %}
+  {% if tb_base in ('TIMESTAMP_NTZ', 'TIMESTAMP') and ta_base == 'TIMESTAMP_LTZ' %}
+    {{ return('TIMESTAMP_TZ') }}
+  {% endif %}
+
+  {# BOOLEAN → integer/numeric types (NOT float — BOOLEAN+FLOAT → VARCHAR via LCA) #}
+  {% if ta_base == 'BOOLEAN' and tb_base in ('NUMBER','NUMERIC','DECIMAL','INT','INTEGER','BIGINT','SMALLINT') %}
     {{ return(type_b) }}
   {% endif %}
-  {% if tb_base == 'BOOLEAN' and ta_base in ('NUMBER','NUMERIC','DECIMAL','INT','INTEGER','BIGINT','SMALLINT','FLOAT','DOUBLEPRECISION','REAL') %}
+  {% if tb_base == 'BOOLEAN' and ta_base in ('NUMBER','NUMERIC','DECIMAL','INT','INTEGER','BIGINT','SMALLINT') %}
     {{ return(type_a) }}
   {% endif %}
 
@@ -129,6 +139,6 @@
   {% endif %}
 
   {# ── Cross-family conflict → safe fallback ─────────────────────── #}
-  {{ return('VARCHAR(256)') }}
+  {{ return('VARCHAR(16777216)') }}
 
 {% endmacro %}
