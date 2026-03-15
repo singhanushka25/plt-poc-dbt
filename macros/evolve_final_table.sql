@@ -2,38 +2,25 @@
   {#
     Schema evolution for the PLT final table.
 
-    Compares unified_columns (resolved across all sources) against what currently
-    exists in the final table. For every column that is in unified_columns but
-    missing from the final table, issues ALTER TABLE ... ADD COLUMN.
+    Compares unified_columns against the final table's current columns.
+    Adds any column present in unified but missing from the final table.
 
-    Only runs in incremental mode — on first run DBT creates the table from the
-    SELECT schema, so all columns from the unified schema are already included.
+    Only runs in incremental mode — first run creates the table from SELECT.
 
-    Narrowing (a resolved type is narrower than the current final column type)
-    is NOT handled here — that requires a CONFLICT alert and is out of scope
-    for the POC.
-
-    target:          DBT relation (this) pointing at the final table
+    target:          dbt relation (this) pointing at the final table
     unified_columns: dict of {COLUMN_NAME: DATA_TYPE} from resolve_column_schema
   #}
   {% if is_incremental() %}
+    {% set final_columns = adapter.get_columns_in_relation(target) %}
+    {% set final_col_names = final_columns | map(attribute='name') | map('upper') | list %}
+
     {% for col_name, col_type in unified_columns.items() %}
-      {% set check_query %}
-        SELECT COUNT(*) AS cnt
-        FROM {{ target.database }}.INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = UPPER('{{ target.schema }}')
-          AND TABLE_NAME   = UPPER('{{ target.identifier }}')
-          AND COLUMN_NAME  = UPPER('{{ col_name }}')
-      {% endset %}
-
-      {% set result = run_query(check_query) %}
-
-      {% if execute and result.columns[0].values()[0] == 0 %}
+      {% if col_name | upper not in final_col_names %}
         {% do run_query(
           "ALTER TABLE " ~ target ~ " ADD COLUMN " ~ col_name ~ " " ~ col_type
         ) %}
         {{ log(
-          "PLT evolve_final_table: added " ~ col_name ~ " (" ~ col_type ~ ") to " ~ target,
+          "PLT evolve_final_table: added " ~ col_name ~ " (" ~ col_type ~ ")",
           info=True
         ) }}
       {% endif %}
