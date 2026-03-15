@@ -7,13 +7,12 @@
     k1_prime_schema  Temp schema written by pipeline k1_prime
     k1_table         Table name (same in both schemas, e.g. ORDERS)
 
-  What this model does:
-    1. resolve_column_schema  — introspects source tables via dbt adapter,
-                                computes the union of all columns (first type wins).
-    2. evolve_final_table     — ADD COLUMN for anything new in the sources.
-    3. generate_source_select — builds a SELECT per source, NULL-padding any
-                                column that the source does not have.
-    4. UNION ALL + MERGE      — dbt incremental merge keyed on (id, pipeline).
+  Flow:
+    1. resolve_column_schema  — introspects sources, builds unified + per-source column maps
+    2. evolve_final_table     — ADD COLUMN for anything new in the sources
+    3. Read final table schema — the source of truth for SELECT generation
+    4. generate_source_select — SELECT based on final table columns, NULL-pad per source
+    5. UNION ALL + MERGE      — dbt incremental merge keyed on (id, pipeline)
 #}
 
 {% set plt_sources = [
@@ -42,8 +41,23 @@
   {% do evolve_final_table(this, unified_cols) %}
 {% endif %}
 
-{# Step 3 + 4: UNION ALL — each source SELECT is NULL-padded to unified schema #}
-{% if unified_cols | length > 0 %}
+{# Step 3: Read final table schema (source of truth for SELECTs) #}
+{# On first run the table doesn't exist yet — fall back to unified #}
+{% if is_incremental() %}
+  {% set final_rel = adapter.get_relation(database=this.database, schema=this.schema, identifier=this.identifier) %}
+  {% set final_columns = adapter.get_columns_in_relation(final_rel) %}
+  {% set select_schema = {} %}
+  {% for col in final_columns %}
+    {% if col.name | upper != '__HEVO_SOURCE_PIPELINE' %}
+      {% do select_schema.update({col.name | upper: col.dtype | upper}) %}
+    {% endif %}
+  {% endfor %}
+{% else %}
+  {% set select_schema = unified_cols %}
+{% endif %}
+
+{# Step 4: UNION ALL — each source SELECT is NULL-padded to final table schema #}
+{% if select_schema | length > 0 %}
   {% set ns = namespace(first=true) %}
   {% for src in plt_sources %}
     {% if src.label in source_cols %}
@@ -51,7 +65,7 @@
 UNION ALL
       {% endif %}
       {% set ns.first = false %}
-{{ generate_source_select(src, unified_cols, source_cols) }}
+{{ generate_source_select(src, select_schema, source_cols) }}
     {% endif %}
   {% endfor %}
 {% else %}
