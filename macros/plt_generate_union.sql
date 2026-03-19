@@ -28,8 +28,15 @@ SELECT
       {% if col_upper in src_cols %}
         {% set src_type = src_cols[col_upper] | upper | replace(' ', '') %}
         {% set unified_norm = meta['full_type'] | upper | replace(' ', '') %}
+        {% set tgt_base = unified_norm.split('(')[0] %}
+        {% set src_base = src_type.split('(')[0] %}
+        {% set string_bases = ['VARCHAR', 'TEXT', 'STRING', 'CHARACTERVARYING'] %}
+        {% set is_tgt_string = tgt_base in string_bases %}
+        {% set is_src_string = src_base in string_bases %}
         {% if src_type == unified_norm %}
   {{ col_name }},
+        {% elif is_tgt_string and not is_src_string %}
+  TO_VARCHAR({{ col_name }}) AS {{ col_name }},
         {% else %}
   TRY_CAST({{ col_name }} AS {{ meta['full_type'] }}) AS {{ col_name }},
         {% endif %}

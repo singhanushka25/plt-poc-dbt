@@ -35,8 +35,8 @@
 {% set unified = result['unified'] %}
 {% set source_columns = result['source_columns'] %}
 
-{# Guard: abort if no sources exist #}
-{% if unified | length == 0 %}
+{# Guard: abort if no sources exist (only during execution — parse phase may see empty unified) #}
+{% if execute and unified | length == 0 %}
   {{ exceptions.raise_compiler_error("PLT: No active sources found — cannot generate model.") }}
 {% endif %}
 
@@ -46,4 +46,9 @@
 {% endif %}
 
 {# Step 3: Generate UNION ALL with TRY_CAST + NULL-pad #}
+{# During parse phase unified is empty; return a placeholder so dbt can build the manifest #}
+{% if unified | length > 0 %}
 {{ plt_generate_union(plt_sources, unified, source_columns) }}
+{% else %}
+SELECT NULL AS _plt_placeholder WHERE FALSE
+{% endif %}
