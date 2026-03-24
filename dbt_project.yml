@@ -10,6 +10,13 @@ clean-targets:
   - "target"
   - "dbt_packages"
 
+vars:
+  plt_sources:
+    - { schema: 'K1_STAGING', label: 'k1' }
+    - { schema: 'K1_PRIME_STAGING', label: 'k1_prime' }
+  plt_database: "{{ env_var('SNOWFLAKE_DATABASE', 'PLT_POC') }}"
+  plt_table: 'ORDERS'
+
 models:
   plt_poc:
     plt:
