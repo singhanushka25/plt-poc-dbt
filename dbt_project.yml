@@ -23,3 +23,5 @@ models:
       +materialized: incremental
     plt_sync:
       +materialized: incremental
+    plt_datatype_scenarios:
+      +materialized: incremental
