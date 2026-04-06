@@ -25,3 +25,7 @@ models:
       +materialized: incremental
     plt_datatype_scenarios:
       +materialized: incremental
+    plt_datatype_matrix:
+      +materialized: incremental
+    plt_transformations:
+      +materialized: incremental
